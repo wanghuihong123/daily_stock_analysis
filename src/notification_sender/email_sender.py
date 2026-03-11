@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Email 发送提醒服务
+Email 发送提醒服务（适配 Python 3.13 + QQ 邮箱）
 
 职责：
 1. 通过 SMTP 发送 Email 消息
@@ -12,15 +12,12 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
 from email.header import Header
-from email.utils import formataddr
 import smtplib
 
 from src.config import Config
 from src.formatters import markdown_to_html_document
 
-
 logger = logging.getLogger(__name__)
-
 
 # SMTP 服务器配置（自动识别）
 SMTP_CONFIGS = {
@@ -48,7 +45,7 @@ SMTP_CONFIGS = {
 
 
 class EmailSender:
-    
+
     def __init__(self, config: Config):
         """
         初始化 Email 配置
@@ -58,16 +55,16 @@ class EmailSender:
         """
         self._email_config = {
             'sender': config.email_sender,
-            'sender_name': getattr(config, 'email_sender_name', 'daily_stock_analysis股票分析助手'),
+            'sender_name': getattr(config, 'email_sender_name', '股票分析助手'),
             'password': config.email_password,
             'receivers': config.email_receivers or ([config.email_sender] if config.email_sender else []),
         }
         self._stock_email_groups = getattr(config, 'stock_email_groups', None) or []
-        
+
     def _is_email_configured(self) -> bool:
         """检查邮件配置是否完整（只需邮箱和授权码）"""
         return bool(self._email_config['sender'] and self._email_config['password'])
-    
+
     def get_receivers_for_stocks(self, stock_codes: List[str]) -> List[str]:
         """
         Look up email receivers for given stock codes based on stock_email_groups.
@@ -104,82 +101,94 @@ class EmailSender:
                 seen.add(e)
                 result.append(e)
         return result
-    
+
     def send_to_email(
-        self, content: str, subject: Optional[str] = None, receivers: Optional[List[str]] = None
+            self, content: str, subject: Optional[str] = None, receivers: Optional[List[str]] = None
     ) -> bool:
         """
         通过 SMTP 发送邮件（自动识别 SMTP 服务器）
-        
+
         Args:
             content: 邮件内容（支持 Markdown，会转换为 HTML）
             subject: 邮件主题（可选，默认自动生成）
             receivers: 收件人列表（可选，默认使用配置的 receivers）
-            
+
         Returns:
             是否发送成功
         """
         if not self._is_email_configured():
             logger.warning("邮件配置不完整，跳过推送")
             return False
-        
+
         sender = self._email_config['sender']
         password = self._email_config['password']
         receivers = receivers or self._email_config['receivers']
-        
+
         try:
-            # 生成主题
+            # 生成主题（恢复 Emoji，兼容 Python 3.13）
             if subject is None:
                 date_str = datetime.now().strftime('%Y-%m-%d')
                 subject = f"📈 股票智能分析报告 - {date_str}"
-            
+
             # 将 Markdown 转换为简单 HTML
             html_content = markdown_to_html_document(content)
-            
+
             # 构建邮件
             msg = MIMEMultipart('alternative')
-            msg['Subject'] = Header(subject, 'utf-8')
-            msg['From'] = formataddr((self._email_config.get('sender_name', '股票分析助手'), sender))
+
+            # 修复1：主题编码（适配 Python 3.13）
+            msg['Subject'] = Header(subject, 'utf-8').encode()
+
+            # 修复2：From 头（放弃 formataddr，手动构造，彻底解决 ASCII 编码问题）
+            sender_name = self._email_config.get('sender_name', '股票分析助手')
+            msg['From'] = f"{Header(sender_name, 'utf-8').encode()} <{sender}>"
+
+            # 收件人配置
             msg['To'] = ', '.join(receivers)
-            
+
             # 添加纯文本和 HTML 两个版本
             text_part = MIMEText(content, 'plain', 'utf-8')
             html_part = MIMEText(html_content, 'html', 'utf-8')
             msg.attach(text_part)
             msg.attach(html_part)
-            
-            # 自动识别 SMTP 配置
+
+            # 自动识别 SMTP 配置（强化 QQ 邮箱适配）
             domain = sender.split('@')[-1].lower()
-            smtp_config = SMTP_CONFIGS.get(domain)
-            
-            if smtp_config:
-                smtp_server = smtp_config['server']
-                smtp_port = smtp_config['port']
-                use_ssl = smtp_config['ssl']
-                logger.info(f"自动识别邮箱类型: {domain} -> {smtp_server}:{smtp_port}")
-            else:
-                # 未知邮箱，尝试通用配置
-                smtp_server = f"smtp.{domain}"
+            if domain == "qq.com":
+                smtp_server = "smtp.qq.com"
                 smtp_port = 465
                 use_ssl = True
-                logger.warning(f"未知邮箱类型 {domain}，尝试通用配置: {smtp_server}:{smtp_port}")
-            
+                logger.info(f"强制使用 QQ 邮箱配置: {smtp_server}:{smtp_port}")
+            else:
+                smtp_config = SMTP_CONFIGS.get(domain)
+                if smtp_config:
+                    smtp_server = smtp_config['server']
+                    smtp_port = smtp_config['port']
+                    use_ssl = smtp_config['ssl']
+                    logger.info(f"自动识别邮箱类型: {domain} -> {smtp_server}:{smtp_port}")
+                else:
+                    # 未知邮箱，尝试通用配置
+                    smtp_server = f"smtp.{domain}"
+                    smtp_port = 465
+                    use_ssl = True
+                    logger.warning(f"未知邮箱类型 {domain}，尝试通用配置: {smtp_server}:{smtp_port}")
+
             # 根据配置选择连接方式
             if use_ssl:
                 # SSL 连接（端口 465）
-                server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
+                server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=60)
             else:
                 # TLS 连接（端口 587）
-                server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+                server = smtplib.SMTP(smtp_server, smtp_port, timeout=60)
                 server.starttls()
-            
+
             server.login(sender, password)
-            server.send_message(msg)
+            server.sendmail(sender, receivers, msg.as_string())
             server.quit()
-            
+
             logger.info(f"邮件发送成功，收件人: {receivers}")
             return True
-            
+
         except smtplib.SMTPAuthenticationError:
             logger.error("邮件发送失败：认证错误，请检查邮箱和授权码是否正确")
             return False
@@ -187,11 +196,11 @@ class EmailSender:
             logger.error(f"邮件发送失败：无法连接 SMTP 服务器 - {e}")
             return False
         except Exception as e:
-            logger.error(f"发送邮件失败: {e}")
+            logger.error(f"发送邮件失败: {e}", exc_info=True)
             return False
 
     def _send_email_with_inline_image(
-        self, image_bytes: bytes, receivers: Optional[List[str]] = None
+            self, image_bytes: bytes, receivers: Optional[List[str]] = None
     ) -> bool:
         """Send email with inline image attachment (Issue #289)."""
         if not self._is_email_configured():
@@ -203,10 +212,15 @@ class EmailSender:
             date_str = datetime.now().strftime('%Y-%m-%d')
             subject = f"📈 股票智能分析报告 - {date_str}"
             msg = MIMEMultipart('related')
-            msg['Subject'] = Header(subject, 'utf-8')
-            msg['From'] = formataddr(
-                (self._email_config.get('sender_name', '股票分析助手'), sender)
-            )
+
+            # 修复1：主题编码（适配 Python 3.13）
+            msg['Subject'] = Header(subject, 'utf-8').encode()
+
+            # 修复2：From 头（放弃 formataddr，手动构造）
+            sender_name = self._email_config.get('sender_name', '股票分析助手')
+            msg['From'] = f"{Header(sender_name, 'utf-8').encode()} <{sender}>"
+
+            # 收件人配置
             msg['To'] = ', '.join(receivers)
 
             alt = MIMEMultipart('alternative')
@@ -223,25 +237,30 @@ class EmailSender:
             img_part.add_header('Content-ID', '<report-image>')
             msg.attach(img_part)
 
+            # 强化 QQ 邮箱适配
             domain = sender.split('@')[-1].lower()
-            smtp_config = SMTP_CONFIGS.get(domain)
-            if smtp_config:
-                smtp_server, smtp_port = smtp_config['server'], smtp_config['port']
-                use_ssl = smtp_config['ssl']
-            else:
-                smtp_server, smtp_port = f"smtp.{domain}", 465
+            if domain == "qq.com":
+                smtp_server = "smtp.qq.com"
+                smtp_port = 465
                 use_ssl = True
+            else:
+                smtp_config = SMTP_CONFIGS.get(domain)
+                if smtp_config:
+                    smtp_server, smtp_port = smtp_config['server'], smtp_config['port']
+                    use_ssl = smtp_config['ssl']
+                else:
+                    smtp_server, smtp_port = f"smtp.{domain}", 465, True
 
             if use_ssl:
-                server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
+                server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=60)
             else:
-                server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+                server = smtplib.SMTP(smtp_server, smtp_port, timeout=60)
                 server.starttls()
             server.login(sender, password)
-            server.send_message(msg)
+            server.sendmail(sender, receivers, msg.as_string())
             server.quit()
             logger.info("邮件（内联图片）发送成功，收件人: %s", receivers)
             return True
         except Exception as e:
-            logger.error("邮件（内联图片）发送失败: %s", e)
+            logger.error("邮件（内联图片）发送失败: %s", e, exc_info=True)
             return False
